@@ -1,44 +1,114 @@
-**Auto-Logout Script for Inactive Lab Machines**
+# JAMF Auto-Logout Scripts
 
+Automatically log out inactive macOS lab machines managed by Jamf Pro. Designed for shared computing environments (labs, libraries, kiosks) where idle sessions should be reclaimed.
 
+## Compatibility
 
-**Overview**
-This repository contains two Bash scripts designed to manage and enforce auto-logout on inactive macOS lab machines using Jamf. The scripts ensure that machines are automatically logged out after a specified idle time, helping to maintain security and efficiency in lab environments.
+| macOS Version | Architecture | Status |
+|---|---|---|
+| macOS 15 Sequoia | Intel / Apple Silicon | Supported |
+| macOS 16–25 | Intel / Apple Silicon | Supported |
+| macOS 26 Tahoe | Apple Silicon | Supported |
 
-**Scripts Included**
-auto_logout_setup.sh: This script sets up a launch daemon (com.denison.autologout.plist) that triggers a Jamf policy (autologout) after a defined interval. It also disables system sleep to prevent interference with the logout process.
+### What changed for Tahoe
 
-auto_logout_check.sh: This script checks for user idle time and initiates the logout process if the machine has been idle for a specified duration. It handles force-quitting applications and logging out the user either directly or after displaying a warning prompt using Jamf's jamfHelper.
+The original scripts relied on APIs deprecated or removed in recent macOS releases:
 
-**Setup Instructions**
-Prerequisites
-Jamf Pro: Ensure Jamf Pro is configured and accessible.
-Jamf Helper: The jamfHelper binary must be present on the machines. Adjust the path in auto_logout_check.sh (jamfHelperPath) if necessary.
-Admin Privileges: Scripts require sudo privileges to execute certain commands.
-**Steps**
-Clone the Repository:
+| Issue | Old Approach | Updated Approach |
+|---|---|---|
+| Screen lock detection | `ioreg -n IODisplayWrangler` (removed on Apple Silicon) | `CGSessionCopyCurrentDictionary` via python3/objc bridge, with `ScreenSaverEngine` fallback |
+| Idle time | `ioreg -c IOHIDSystem` (shallow query) | `ioreg -c IOHIDSystem -d 4` (explicit depth for Apple Silicon reliability) |
+| LaunchDaemon loading | `launchctl load` (deprecated since macOS 13) | `launchctl bootstrap system` |
+| User logout | `pkill loginwindow` (can crash the system) | AppleScript `«event aevtrlgo»` (graceful logout) |
+| App quit loop | `for` loop over `osascript` output (breaks on spaces) | Native AppleScript `repeat` block |
+| Log location | `/tmp/` (cleared on reboot) | `/var/log/` (persistent) |
+| Console user check | `who` (includes SSH sessions) | `/usr/bin/stat -f%Su /dev/console` (console-only) |
 
-Setup auto_logout_setup.sh:
+## Scripts
 
-Edit the auto_logout_setup.sh script to customize paths or settings if needed.
-Execute the script on each lab machine to install the launch daemon and configure settings.
-bash
-Copy code
-sudo ./auto_logout_setup.sh
-Deploy auto_logout_check.sh via Jamf:
+### `auto_logout.sh`
 
-Upload auto_logout_check.sh to your Jamf Pro console.
-Create a policy in Jamf Pro to deploy auto_logout_check.sh and set it to run recurrently (e.g., every 5 minutes).
-Ensure the policy runs with root privileges to manage applications and logout actions.
-Testing and Troubleshooting:
+The main script that runs on each trigger:
 
-Test the setup by leaving a machine idle for the specified duration to verify auto-logout functionality.
-Review logs (/tmp/com.denison.autologout.out and /tmp/com.denison.autologout.err) for any issues.
+1. Checks if an interactive user is logged in at the console
+2. Reads system idle time via `IOHIDSystem`
+3. If idle time exceeds the threshold (default: 15 minutes):
+   - **Screen locked**: immediately quits apps and logs out
+   - **Screen unlocked**: shows a warning dialog via `jamfHelper` with a countdown; the user can cancel
+4. Gracefully quits all foreground applications, then triggers logout via AppleScript
 
+**Configuration** (edit the variables at the top of the script):
 
+| Variable | Default | Description |
+|---|---|---|
+| `IDLE_THRESHOLD` | `900` | Seconds of inactivity before logout (900 = 15 min) |
+| `WARNING_TIMEOUT` | `20` | Seconds the warning dialog stays on screen |
+| `JAMF_HELPER` | `/Library/Application Support/JAMF/bin/jamfHelper.app/Contents/MacOS/jamfHelper` | Path to jamfHelper binary |
+| `ICON` | `AlertNoteIcon.icns` | Icon shown in the warning dialog |
 
+### `auto_logout_launchdaemon.sh`
 
-**Notes**
-Idle Time: Adjust the idle time threshold (900 seconds by default, equals 15 minutes) in auto_logout_check.sh as per your lab's requirements.
-Customization: Modify the scripts according to specific needs, such as changing the warning message or adding additional checks.
-Security: Ensure proper security measures are in place, as auto-logout involves force-quitting applications and potentially interrupting user sessions.
+Installs and loads a LaunchDaemon (`com.denison.autologout`) that triggers the Jamf `autologout` policy every 10 minutes. Also disables system sleep so the daemon fires reliably.
+
+## Setup
+
+### Prerequisites
+
+- **Jamf Pro** enrolled machines with the `jamf` binary at `/usr/local/bin/jamf`
+- **jamfHelper** installed (ships with the Jamf agent)
+- **Root privileges** for daemon installation and logout commands
+
+### 1. Install the LaunchDaemon
+
+Run on each target machine (or deploy via Jamf):
+
+```bash
+sudo bash auto_logout_launchdaemon.sh
+```
+
+This creates `/Library/LaunchDaemons/com.denison.autologout.plist` and loads it immediately.
+
+### 2. Deploy the logout script via Jamf
+
+1. Upload `auto_logout.sh` to your Jamf Pro console (Settings > Scripts)
+2. Create a policy:
+   - **Trigger**: Custom event named `autologout`
+   - **Execution Frequency**: Ongoing
+   - **Script**: `auto_logout.sh`
+   - **Scope**: Target lab machines
+3. The LaunchDaemon calls `jamf policy -event autologout` every 10 minutes, which runs the script
+
+### 3. Verify
+
+```bash
+# Check the daemon is loaded
+launchctl print system/com.denison.autologout
+
+# Watch logs
+tail -f /var/log/com.denison.autologout.out
+
+# Manually trigger for testing
+sudo jamf policy -event autologout
+```
+
+## Uninstall
+
+```bash
+sudo launchctl bootout system /Library/LaunchDaemons/com.denison.autologout.plist
+sudo rm /Library/LaunchDaemons/com.denison.autologout.plist
+sudo pmset -a sleep 1  # re-enable sleep if desired
+```
+
+## Legacy Scripts
+
+The original scripts (`Auto Logout.sh` and `AutoLogout Launch Daemon.sh`) are retained for reference but are not recommended for macOS 13+ or Apple Silicon machines.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Script exits immediately | No console user logged in | Expected behavior — no action needed |
+| Warning dialog not shown | `jamfHelper` missing or path changed | Verify path in `JAMF_HELPER` variable |
+| Idle time always 0 | `IOHIDSystem` not returning data | Check `ioreg -c IOHIDSystem -d 4 \| grep HIDIdleTime` manually |
+| Daemon not firing | `launchctl bootstrap` failed | Check `launchctl print system/com.denison.autologout` for errors |
+| Logout not working | TCC or MDM restrictions | Ensure the Jamf agent has Full Disk Access and the script runs as root |
