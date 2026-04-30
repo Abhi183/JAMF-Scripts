@@ -13,11 +13,43 @@ set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Configuration
+#
+# Defaults below can be overridden at runtime via:
+#   - Jamf script parameters $4 / $5 / $6 (Jamf injects $1-$3 itself)
+#   - CLI flags when invoked directly (--idle / --warning / --dry-run)
+#
+#   $4 / --idle <seconds>     Idle threshold before logout (default: 900)
+#   $5 / --warning <seconds>  Warning dialog timeout (default: 20)
+#   $6 / --dry-run            "true" or "1" to simulate without logging out
 # ---------------------------------------------------------------------------
 IDLE_THRESHOLD=900          # seconds (15 minutes)
 WARNING_TIMEOUT=20          # seconds before auto-logout after warning
+DRY_RUN=0                   # 1 = log only, do not quit apps or log out
 JAMF_HELPER="/Library/Application Support/JAMF/bin/jamfHelper.app/Contents/MacOS/jamfHelper"
 ICON="/System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/AlertNoteIcon.icns"
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+is_positive_int() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+truthy() { [[ "${1:-}" == "true" || "${1:-}" == "1" || "${1:-}" == "yes" ]]; }
+
+# Jamf passes $1=mountPoint, $2=computerName, $3=username, then policy params $4+.
+# Only consume them if they exist and look like values for us.
+if [[ $# -ge 4 ]] && is_positive_int "${4:-}"; then IDLE_THRESHOLD="$4"; fi
+if [[ $# -ge 5 ]] && is_positive_int "${5:-}"; then WARNING_TIMEOUT="$5"; fi
+if [[ $# -ge 6 ]] && truthy "${6:-}"; then DRY_RUN=1; fi
+
+# Allow direct CLI use too (handy for local testing outside Jamf).
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --idle)     shift; is_positive_int "${1:-}" && IDLE_THRESHOLD="$1" ;;
+        --warning)  shift; is_positive_int "${1:-}" && WARNING_TIMEOUT="$1" ;;
+        --dry-run)  DRY_RUN=1 ;;
+        *) ;;
+    esac
+    shift || true
+done
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -88,8 +120,15 @@ except Exception:
 
 # ---------------------------------------------------------------------------
 # Gracefully quit all user applications, then log out.
+# Honors DRY_RUN: logs intent without actually quitting or logging out.
 # ---------------------------------------------------------------------------
 force_quit_all_apps_and_logout() {
+    if (( DRY_RUN )); then
+        log "[dry-run] Would force-quit all foreground apps."
+        log "[dry-run] Would issue graceful logout via loginwindow Apple Event."
+        return
+    fi
+
     log "Force-quitting all user applications..."
 
     # Quit apps via AppleScript — handles names with spaces correctly
@@ -153,6 +192,8 @@ display_logout_warning() {
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+log "Config: idle_threshold=${IDLE_THRESHOLD}s warning_timeout=${WARNING_TIMEOUT}s dry_run=${DRY_RUN}"
+
 idle_time=$(get_idle_time)
 log "Idle time: ${idle_time}s (threshold: ${IDLE_THRESHOLD}s)"
 
