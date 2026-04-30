@@ -1,5 +1,7 @@
 # JAMF Auto-Logout Scripts
 
+[![shellcheck](https://github.com/Abhi183/JAMF-Auto-Logout-Scripts/actions/workflows/shellcheck.yml/badge.svg)](https://github.com/Abhi183/JAMF-Auto-Logout-Scripts/actions/workflows/shellcheck.yml)
+
 Automatically log out inactive macOS lab machines managed by Jamf Pro. Designed for shared computing environments (labs, libraries, kiosks) where idle sessions should be reclaimed.
 
 ## Compatibility
@@ -37,14 +39,25 @@ The main script that runs on each trigger:
    - **Screen unlocked**: shows a warning dialog via `jamfHelper` with a countdown; the user can cancel
 4. Gracefully quits all foreground applications, then triggers logout via AppleScript
 
-**Configuration** (edit the variables at the top of the script):
+**Configuration** — defaults can be overridden at runtime via Jamf script parameters or CLI flags, no script edit required:
 
-| Variable | Default | Description |
-|---|---|---|
-| `IDLE_THRESHOLD` | `900` | Seconds of inactivity before logout (900 = 15 min) |
-| `WARNING_TIMEOUT` | `20` | Seconds the warning dialog stays on screen |
-| `JAMF_HELPER` | `/Library/Application Support/JAMF/bin/jamfHelper.app/Contents/MacOS/jamfHelper` | Path to jamfHelper binary |
-| `ICON` | `AlertNoteIcon.icns` | Icon shown in the warning dialog |
+| Variable | Default | Jamf param | CLI flag | Description |
+|---|---|---|---|---|
+| `IDLE_THRESHOLD` | `900` | `$4` | `--idle <seconds>` | Seconds of inactivity before logout (900 = 15 min) |
+| `WARNING_TIMEOUT` | `20` | `$5` | `--warning <seconds>` | Seconds the warning dialog stays on screen |
+| `DRY_RUN` | `0` | `$6` (`true`/`1`) | `--dry-run` | Logs intent without quitting apps or logging out — useful for testing |
+| `JAMF_HELPER` | `/Library/Application Support/JAMF/bin/jamfHelper.app/Contents/MacOS/jamfHelper` | — | — | Path to jamfHelper binary |
+| `ICON` | `AlertNoteIcon.icns` | — | — | Icon shown in the warning dialog |
+
+**Examples:**
+
+```bash
+# Local dry run with a 5-minute threshold (no logout will actually happen)
+sudo ./auto_logout.sh --idle 300 --dry-run
+
+# Jamf policy parameters: idle=600, warning=30, dry-run=true
+# (filled into the policy "Script Parameters" fields $4, $5, $6)
+```
 
 ### `auto_logout_launchdaemon.sh`
 
